@@ -4,8 +4,6 @@ A research-oriented stress-monitoring prototype that combines physiological sign
 
 > [!CAUTION]
 > **Research prototype only — not a medical device.** The displayed labels are experimental model outputs, not a diagnosis or a direct measurement of psychological state. Hardware timing, sensor calibration, training/inference parity, and real-world performance have not been established by this repository.
->
-> **Known model-artifact blocker:** the deployment metadata describes a binary `binary:logistic` XGBoost model, but inspection of the bundled `final_model.pkl` has shown regression-objective strings (`reg:squarederror`). The backend is designed to fail closed when the objective does not match. Treat live inference as **unvalidated and potentially unavailable** until the model owner verifies the artifact with the recorded runtime and resolves the mismatch. The saved artifacts are preserved; they have not been silently replaced or retrained.
 
 ## Highlights
 
@@ -16,27 +14,6 @@ A research-oriented stress-monitoring prototype that combines physiological sign
 - **Local web application:** Flask REST endpoints, WebSocket updates, login/session handling, MySQL persistence, and a vanilla HTML/CSS/JavaScript dashboard.
 - **Regression tests:** tests cover API ownership, buffering/receiver behavior, signal/inference checks, and stale frontend callbacks without requiring an ESP32 board.
 
-## Architecture
-
-```mermaid
-flowchart TD
-    A[MAX30102 PPG] --> E[ESP32-S3]
-    B[MPU6500 motion] --> E
-    C[Grove GSR / EDA] --> E
-    E -->|USB serial · newline JSON| F[Python serial receiver]
-    F --> G[Sample validation and rolling buffer]
-    G --> H[Quality and motion checks]
-    H --> I[PPG / EDA processing]
-    I --> J[Nine-feature extraction]
-    J --> K[Session baseline calibration]
-    K --> L[Validated model bundle]
-    L --> M[Flask API and WebSocket]
-    M --> N[MySQL history]
-    M --> O[Browser dashboard]
-    N --> O
-```
-
-The current design supports one physical serial receiver and one active acquisition session at a time. Model inference is subject to the artifact compatibility warning above.
 
 ## Technology stack
 
