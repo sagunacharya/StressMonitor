@@ -24,10 +24,10 @@
 
     <form id="authForm" class="auth-form">
       <label>Username
-        <input type="text" id="username" autocomplete="username" required minlength="3" />
+        <input type="text" id="username" autocomplete="username" required minlength="3" maxlength="32" />
       </label>
       <label>Password
-        <input type="password" id="password" autocomplete="current-password" required minlength="6" />
+        <input type="password" id="password" autocomplete="current-password" required />
       </label>
       <div id="authError" class="auth-error"></div>
       <button type="submit" id="authSubmit" class="btn btn-start auth-submit">Sign In</button>

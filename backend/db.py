@@ -5,6 +5,7 @@ so your real password never has to be hardcoded or committed anywhere.
 """
 
 import os
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -19,6 +20,10 @@ DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "stress_dashboard")
+if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", DB_NAME):
+    raise ValueError("DB_NAME must be a SQL identifier containing only letters, digits, and underscores")
+if not (1 <= DB_PORT <= 65535):
+    raise ValueError("DB_PORT must be between 1 and 65535")
 
 
 def _connect(with_db: bool = True):
@@ -131,11 +136,30 @@ def start_session(subject_id: str = "SUBJECT-01", user_id: int | None = None) ->
     return {"id": session_id, "user_id": user_id, "subject_id": subject_id, "start_time": now, "end_time": None}
 
 
-def stop_session(session_id: str):
+def get_session(session_id: str, user_id: int):
+    """Return a session only when it is owned by the given authenticated user."""
+    with get_conn() as conn:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT id, user_id, subject_id, start_time, end_time FROM sessions WHERE id = %s AND user_id = %s",
+            (session_id, user_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row
+
+
+def stop_session(session_id: str, user_id: int) -> bool:
+    """Stop only an owned, still-active session; return whether one row changed."""
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE sessions SET end_time = %s WHERE id = %s", (time.time(), session_id))
+        cur.execute(
+            "UPDATE sessions SET end_time = %s WHERE id = %s AND user_id = %s AND end_time IS NULL",
+            (time.time(), session_id, user_id),
+        )
+        changed = cur.rowcount == 1
         cur.close()
+        return changed
 
 
 def insert_reading(session_id: str, timestamp: float, features: dict, label: int, prob: float):
@@ -156,7 +180,7 @@ def insert_reading(session_id: str, timestamp: float, features: dict, label: int
         cur.close()
 
 
-def list_sessions(user_id: int | None = None) -> list[dict]:
+def list_sessions(user_id: int, limit: int = 200) -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
@@ -165,22 +189,29 @@ def list_sessions(user_id: int | None = None) -> list[dict]:
                    CAST(COALESCE(SUM(r.stress_label), 0) AS UNSIGNED) AS stressed_count
             FROM sessions s
             LEFT JOIN readings r ON r.session_id = s.id
-            WHERE (%s IS NULL OR s.user_id = %s)
+            WHERE s.user_id = %s
             GROUP BY s.id, s.user_id, s.subject_id, s.start_time, s.end_time
-            ORDER BY s.start_time DESC
-        """, (user_id, user_id))
+            ORDER BY s.start_time DESC LIMIT %s
+        """, (user_id, max(1, min(int(limit), 500))))
         rows = cur.fetchall()
         cur.close()
         return rows
 
 
-def get_session_readings(session_id: str) -> list[dict]:
+def get_session_readings(session_id: str, user_id: int, limit: int = 300) -> list[dict]:
+    """Fetch bounded readings only for a session owned by this user."""
     with get_conn() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute(
-            "SELECT * FROM readings WHERE session_id = %s ORDER BY timestamp ASC",
-            (session_id,),
+            """SELECT r.id, r.session_id, r.timestamp, r.hr, r.sdnn, r.rmssd,
+                      r.eda_mean, r.eda_std, r.eda_min, r.eda_max, r.eda_range,
+                      r.eda_slope, r.stress_label, r.stress_prob
+               FROM readings r JOIN sessions s ON s.id = r.session_id
+               WHERE r.session_id = %s AND s.user_id = %s
+               ORDER BY r.timestamp DESC LIMIT %s""",
+            (session_id, user_id, max(1, min(int(limit), 1000))),
         )
         rows = cur.fetchall()
         cur.close()
+        rows.reverse()
         return rows

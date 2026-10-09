@@ -26,12 +26,21 @@ def window_to_arrays(window: dict) -> Optional[dict]:
     no samples at all.
     """
     samples = window["samples"]
-    if not samples:
+    if len(samples) != config.WINDOW_SIZE_SAMPLES:
+        return None
+    try:
+        ir = np.array([s["ir"] for s in samples], dtype=float)
+        acc_magnitude = np.array([s["accMagnitude"] for s in samples], dtype=float)
+        eda_adc = np.array([s["eda"] for s in samples], dtype=float)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (np.all(np.isfinite(ir)) and np.all(np.isfinite(acc_magnitude)) and np.all(np.isfinite(eda_adc))):
+        return None
+    if np.any(eda_adc < 0) or np.any(eda_adc > config.EDA_ADC_MAX):
+        return None
+    if np.any(acc_magnitude < 0) or np.any(acc_magnitude > config.MAX_ACCEL_MAG_G):
         return None
 
-    ir = np.array([s["ir"] for s in samples], dtype=float)
-    acc_magnitude = np.array([s["accMagnitude"] for s in samples], dtype=float)
-    eda_adc = np.array([s["eda"] for s in samples], dtype=float)
 
     return {
         "window_start": window["window_start"],

@@ -1,25 +1,13 @@
-# --- Web backend (Flask + MySQL auth/session, from stress-monitoring-dashboard) ---
+# Python/model versions follow backend/model/deployment_metadata.json where recorded.
+# Use Python 3.13.9 (see .python-version) for the original recorded runtime.
 flask==3.0.3
-flask-cors==4.0.1
 flask-sock==0.7.0
 mysql-connector-python==9.0.0
 python-dotenv==1.0.1
-
-# --- ESP32 serial acquisition (from files__10_.zip sensor pipeline, unchanged) ---
-pyserial>=3.5
-
-# --- Signal processing / feature extraction (unchanged from sensor pipeline) ---
-numpy>=1.24
-scipy>=1.10
-pandas>=2.0
-
-# --- Model inference (from pipeline_updated1.zip deployment artifacts) ---
-# Pin xgboost>=2.1 to safely load a Booster saved by xgboost 3.3.0 (see
-# deployment_metadata.json's software_versions.xgboost) -- if you hit an
-# InconsistentVersionWarning or load error, install the exact matching
-# major version instead: pip install "xgboost==3.3.0"
-xgboost>=2.1.3
-joblib>=1.3
-scikit-learn>=1.4
-# ^ needed to unpickle scaler.pkl (a sklearn ColumnTransformer wrapping a
-# StandardScaler) even though no sklearn code is written by hand here.
+pyserial==3.5
+numpy==2.5.1
+scipy==1.17.0
+pandas==2.3.3
+xgboost==3.3.0
+joblib==1.5.3
+scikit-learn==1.9.0

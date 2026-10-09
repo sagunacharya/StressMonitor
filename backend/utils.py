@@ -18,6 +18,11 @@ def butter_bandpass_filter(
     order: int,
 ) -> np.ndarray:
     """Zero-phase Butterworth bandpass filter via filtfilt."""
+    signal = np.asarray(signal, dtype=float)
+    if signal.ndim != 1 or signal.size < 4 or not np.all(np.isfinite(signal)):
+        raise ValueError("Filter input must be a finite one-dimensional signal with at least 4 samples")
+    if not (0 < low_hz < high_hz < fs / 2):
+        raise ValueError("Bandpass cutoffs must satisfy 0 < low < high < Nyquist")
     nyq = 0.5 * fs
     low = low_hz / nyq
     high = high_hz / nyq
@@ -32,6 +37,11 @@ def butter_lowpass_filter(
     order: int,
 ) -> np.ndarray:
     """Zero-phase Butterworth low-pass filter via filtfilt."""
+    signal = np.asarray(signal, dtype=float)
+    if signal.ndim != 1 or signal.size < 4 or not np.all(np.isfinite(signal)):
+        raise ValueError("Filter input must be a finite one-dimensional signal with at least 4 samples")
+    if not (0 < cutoff_hz < fs / 2):
+        raise ValueError("Low-pass cutoff must be below Nyquist and above zero")
     nyq = 0.5 * fs
     normal_cutoff = cutoff_hz / nyq
     b, a = butter(order, normal_cutoff, btype="low")

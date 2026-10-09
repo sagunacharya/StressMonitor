@@ -1,44 +1,9 @@
-"""
-session_manager.py
-===================
-Bridges the ESP32 serial pipeline (receiver.py -> buffer.py ->
-preprocessing.py -> motion.py -> ppg.py/eda.py -> feature_extraction.py)
-to the web backend's START SESSION / STOP SESSION lifecycle.
-
-Design:
-  - The serial receiver thread is started ONCE at process startup and
-    runs for the process's lifetime -- this is what "64 Hz acquisition
-    is already fixed, do not break it" and "do not reintroduce blocking
-    delays in ESP32" require: the ESP32 keeps streaming at full rate
-    regardless of session state, exactly as buffer.py/receiver.py were
-    already built to do.
-  - What START/STOP actually toggles is whether incoming samples are fed
-    into a *live* SlidingWindowBuffer + SessionInferenceState pair.
-    Before START and after STOP, incoming samples are received (keeping
-    the serial link alive and drained) but simply discarded -- never
-    buffered, never windowed, never used for a prediction. This is what
-    "do not use samples collected before START SESSION" and "on STOP
-    SESSION, stop predictions and clear/reset the session" require.
-  - On START SESSION: a brand-new buffer.SlidingWindowBuffer() and a
-    brand-new inference.SessionInferenceState() are created. Since
-    buffer.SlidingWindowBuffer starts empty by construction, this alone
-    guarantees the fresh-buffer requirement -- there is no "clear()"
-    method to call or forget to call; the old buffer object is simply
-    dropped and a new one takes its place.
-  - A background thread polls the live buffer for ready windows (same
-    poll-loop pattern as the original main.py) and, for each one, runs
-    the full existing quality-gate + feature-extraction chain untouched,
-    then calls SessionInferenceState.predict(). Results are pushed out
-    via the on_result callback (app.py wires this to the WebSocket
-    broadcast + MySQL insert).
-"""
-
+"""Coordinates one physical serial stream with one authenticated live session."""
 from __future__ import annotations
-
 import logging
+import queue
 import threading
 import time
-import uuid
 from typing import Callable, Optional
 
 import buffer
@@ -49,7 +14,6 @@ import preprocessing
 from receiver import SerialReceiver
 
 logger = logging.getLogger("session_manager")
-
 OnResult = Callable[[dict], None]
 OnStatus = Callable[[dict], None]
 
@@ -58,108 +22,201 @@ class SessionManager:
     def __init__(self, on_result: OnResult, on_status: Optional[OnStatus] = None):
         self._on_result = on_result
         self._on_status = on_status or (lambda _status: None)
-
-        self._model_bundle = inference.get_bundle()  # fail fast at startup
-
-        self._lock = threading.Lock()
+        self._model_bundle = inference.get_bundle()
+        self._lock = threading.RLock()
+        # Serial ingestion uses _lock only. Long database/broadcast callbacks
+        # serialize against stop/start via a separate lock so acquisition is
+        # not blocked by persistence latency.
+        self._dispatch_lock = threading.RLock()
+        self._status_queue: queue.Queue[dict] = queue.Queue(maxsize=256)
+        self._last_gap_status_at = 0.0
         self._active_buffer: Optional[buffer.SlidingWindowBuffer] = None
         self._active_inference: Optional[inference.SessionInferenceState] = None
         self.active_session_id: Optional[str] = None
-
-        self._receiver = SerialReceiver(on_sample=self._handle_sample)
-        self._receiver_thread = threading.Thread(
-            target=self._run_receiver_with_status, daemon=True
-        )
-        self._processor_thread = threading.Thread(
-            target=self._process_loop, daemon=True
-        )
+        self.active_user_id: Optional[int] = None
+        self._last_progress_at = 0.0
+        self._receiver = SerialReceiver(on_sample=self._handle_sample, on_status=self._on_status_update)
+        self._receiver_thread = threading.Thread(target=self._receiver.run_forever, daemon=True, name="serial-receiver")
+        self._processor_thread = threading.Thread(target=self._process_loop, daemon=True, name="window-processor")
+        self._status_thread = threading.Thread(target=self._status_loop, daemon=True, name="status-dispatcher")
         self._started = False
-
-    # -- lifecycle: process-level (once) -----------------------------------
-
-    def start_background_threads(self) -> None:
-        """Call once at Flask process startup. Starts the ESP32 serial
-        link immediately (independent of any session) and the window-
-        processing poll loop. Idempotent."""
-        if self._started:
-            return
-        self._started = True
-        self._receiver_thread.start()
-        self._processor_thread.start()
-        logger.info(
-            "Serial receiver + window processor started "
-            "(process-level, independent of session state)."
-        )
-
-    def _run_receiver_with_status(self) -> None:
-        # receiver.run_forever() already logs connect/disconnect/reconnect
-        # to stdout (per-line, per receiver.py's own design); we don't
-        # duplicate that here, but we do want the frontend to know serial
-        # health, so we track it via a lightweight polling flag instead
-        # of threading it through receiver.py's internals.
-        self._receiver.run_forever()
 
     @property
     def esp32_connected(self) -> bool:
-        return bool(getattr(self._receiver, "_connected", False))
+        return self._receiver.connected
 
-    # -- lifecycle: per-session (START/STOP) --------------------------------
+    def serial_diagnostics(self) -> dict:
+        return self._receiver.diagnostics()
 
-    def start_session(self, session_id: str) -> None:
-        """Creates a fresh buffer + fresh inference state and makes them
-        the active target for incoming samples. Any samples that arrive
-        between now and the first call to _handle_sample race only with
-        this lock, never with stale state -- the old buffer/inference
-        objects (if any) are simply replaced, not mutated."""
+    def _queue_status(self, status: dict) -> None:
+        """Bound status memory and never block the serial acquisition callback."""
+        try:
+            self._status_queue.put_nowait(status)
+        except queue.Full:
+            # Preserve newer state transitions by evicting the oldest queued
+            # item. The queue only carries UI status, never sensor samples.
+            try:
+                self._status_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._status_queue.put_nowait(status)
+            except queue.Full:
+                logger.warning("Status queue full; dropping a UI status event")
+
+    def _status_loop(self) -> None:
+        while True:
+            status = self._status_queue.get()
+            try:
+                self._on_status(status)
+            except Exception:
+                logger.exception("Status dispatch failed")
+            finally:
+                self._status_queue.task_done()
+
+    def _on_status_update(self, status: dict) -> None:
+        # A serial disconnect invalidates any partial window. The receiver resets
+        # sequence tracking on reconnect, so the first post-reconnect packet may
+        # not carry a gap marker by itself.
+        if status.get("type") == "esp32_status" and status.get("connected") is False:
+            with self._lock:
+                active = self._active_buffer
+                session_id = self.active_session_id
+                user_id = self.active_user_id
+                if active is not None:
+                    active.reset()
+            if active is not None and session_id is not None and user_id is not None:
+                self._queue_status({"type": "sampling_gap", "session_id": session_id,
+                                    "user_id": user_id, "reason": "serial_disconnected"})
+
+        # Connection health is global. Data-quality diagnostics are associated
+        # with the active session owner and are not broadcast to other users.
+        if status.get("type") == "sensor_quality" and not status.get("user_id"):
+            with self._lock:
+                if self.active_session_id is None or self.active_user_id is None:
+                    return
+                status = {**status, "session_id": self.active_session_id,
+                          "user_id": self.active_user_id}
+        self._queue_status(status)
+
+    def start_background_threads(self) -> None:
         with self._lock:
-            self._active_buffer = buffer.SlidingWindowBuffer()
-            self._active_inference = inference.SessionInferenceState(
-                self._model_bundle
-            )
-            self.active_session_id = session_id
-        logger.info(f"[Session] Started {session_id}: buffer + baseline reset.")
-        self._on_status(
-            {
-                "type": "session_status",
-                "session_id": session_id,
-                "state": "collecting",
-                "samples_needed": config.WINDOW_SIZE_SAMPLES,
-            }
-        )
+            if self._started:
+                return
+            self._started = True
+            self._receiver_thread.start()
+            self._processor_thread.start()
+            self._status_thread.start()
+        logger.info("Serial receiver and window processor started")
 
-    def stop_session(self) -> None:
+    def start_session(self, session_id: str, user_id: int) -> None:
+        with self._dispatch_lock:
+            with self._lock:
+                if self.active_session_id is not None:
+                    raise RuntimeError("A physical sensor session is already active")
+                self._active_buffer = buffer.SlidingWindowBuffer()
+                self._active_inference = inference.SessionInferenceState(self._model_bundle)
+                self.active_session_id = session_id
+                self.active_user_id = int(user_id)
+                self._last_progress_at = 0.0
+            self._queue_status({"type": "session_status", "session_id": session_id,
+                                "user_id": int(user_id), "state": "collecting",
+                                "samples_needed": config.WINDOW_SIZE_SAMPLES})
+
+    def dispatch_guard(self):
+        """Return the re-entrant result-dispatch lock for atomic lifecycle work.
+
+        Callers may hold this around a database stop/commit, then invoke
+        stop_session() re-entrantly. Existing callbacks finish before the DB
+        stop; callbacks waiting behind the guard are rejected after state clear.
+        """
+        return self._dispatch_lock
+
+    def stop_session(self, expected_session_id: Optional[str] = None) -> Optional[str]:
+        with self._dispatch_lock:
+            with self._lock:
+                if expected_session_id and self.active_session_id != expected_session_id:
+                    return None
+                stopped_id, user_id = self.active_session_id, self.active_user_id
+                self._active_buffer = None
+                self._active_inference = None
+                self.active_session_id = None
+                self.active_user_id = None
+                self._last_progress_at = 0.0
+            if stopped_id:
+                self._queue_status({"type": "session_status", "session_id": stopped_id,
+                                    "user_id": user_id, "state": "ready"})
+            return stopped_id
+
+    def current_session_info(self) -> Optional[dict]:
         with self._lock:
-            stopped_id = self.active_session_id
-            self._active_buffer = None
-            self._active_inference = None
-            self.active_session_id = None
-        if stopped_id:
-            logger.info(f"[Session] Stopped {stopped_id}: buffer + state cleared.")
-        self._on_status({"type": "session_status", "state": "ready"})
+            if self.active_session_id is None:
+                return None
+            return {"session_id": self.active_session_id, "user_id": self.active_user_id}
 
-    # -- sample ingestion (always running, gated by active session) --------
+    def status_snapshot(self, user_id: int) -> Optional[dict]:
+        """Return live acquisition/calibration phase for the authorized owner."""
+        with self._lock:
+            if (self.active_session_id is None or self.active_user_id != int(user_id)
+                    or self._active_buffer is None or self._active_inference is None):
+                return None
+            session_id = self.active_session_id
+            buffered = self._active_buffer.samples_collected_this_cycle()
+            inference_state = self._active_inference.snapshot()
+        if inference_state["calibration_failed"]:
+            phase = "calibration_failed"
+        elif inference_state["calibration_ready"]:
+            phase = "prediction_available"
+        elif inference_state["windows_seen"] > 0:
+            phase = "calibrating"
+        else:
+            phase = "collecting"
+        return {
+            "type": "session_status", "session_id": session_id,
+            "state": phase, "samples_collected": buffered,
+            "samples_needed": config.WINDOW_SIZE_SAMPLES,
+            "windows_seen": inference_state["windows_seen"],
+            "windows_needed": inference_state["windows_needed"],
+        }
 
     def _handle_sample(self, sample: dict) -> None:
         with self._lock:
             active = self._active_buffer
-        if active is None:
-            return  # no session running: sample intentionally discarded
-        active.add_sample(sample)
-        # Lightweight progress ping for the "Collecting: X / 3840 samples"
-        # UI state. Cheap (just a counter read) so it's fine every sample
-        # at 64 Hz; the frontend only needs it while collecting.
-        collected = active.samples_collected_this_cycle()
-        if collected is not None:
-            self._on_status(
-                {
-                    "type": "collecting_progress",
-                    "session_id": self.active_session_id,
-                    "samples_collected": collected,
-                    "samples_needed": config.WINDOW_SIZE_SAMPLES,
-                }
-            )
+            session_id = self.active_session_id
+            user_id = self.active_user_id
+            if active is None or session_id is None:
+                return
+            gap_reason = None
+            if sample.get("gap_before"):
+                active.reset()
+                gap_reason = "sample_gap"
+            overflow = active.add_sample(sample)
+            if overflow:
+                gap_reason = "processor_overrun"
+            now = time.monotonic()
+            if gap_reason and now - self._last_gap_status_at >= 1.0:
+                self._last_gap_status_at = now
+                self._queue_status({"type": "sampling_gap", "session_id": session_id,
+                                    "user_id": user_id, "reason": gap_reason})
+            if now - self._last_progress_at >= 0.5:
+                self._last_progress_at = now
+                collected = active.samples_collected_this_cycle()
+                self._queue_status({"type": "collecting_progress", "session_id": session_id,
+                                    "user_id": user_id, "samples_collected": collected,
+                                    "samples_needed": config.WINDOW_SIZE_SAMPLES})
 
-    # -- window processing loop ---------------------------------------------
+    def _emit_for_session(self, payload: dict, active_buf, active_inf, session_id, generation: int) -> None:
+        # Stop/start hold the dispatch lock while changing session state. The
+        # callback may perform a DB write, but the serial sample path never
+        # waits on this lock and continues draining USB packets.
+        with self._dispatch_lock:
+            with self._lock:
+                if (self._active_buffer is not active_buf or self._active_inference is not active_inf
+                        or self.active_session_id != session_id or active_buf.generation != generation):
+                    return
+                payload["session_id"] = session_id
+                payload["user_id"] = self.active_user_id
+            self._on_result(payload)
 
     def _process_loop(self) -> None:
         while True:
@@ -167,95 +224,54 @@ class SessionManager:
                 active_buf = self._active_buffer
                 active_inf = self._active_inference
                 session_id = self.active_session_id
-
-            if active_buf is not None:
+            if active_buf is not None and active_inf is not None and session_id is not None:
                 window = active_buf.pop_ready_window()
                 while window is not None:
-                    self._process_one_window(window, active_inf, session_id)
-                    # Re-check under lock in case STOP happened mid-drain.
+                    self._process_one_window(window, active_buf, active_inf, session_id)
                     with self._lock:
-                        if self._active_buffer is not active_buf:
+                        if self._active_buffer is not active_buf or self.active_session_id != session_id:
                             break
-                        window = active_buf.pop_ready_window()
+                    window = active_buf.pop_ready_window()
+            time.sleep(0.1)
 
-            time.sleep(1.0)  # matches original main.py poll cadence
+    def _process_one_window(self, window: dict, active_buf, active_inf, session_id: str) -> None:
+        generation = window["generation"]
+        def emit(payload):
+            self._emit_for_session(payload, active_buf, active_inf, session_id, generation)
 
-    def _process_one_window(
-        self,
-        window: dict,
-        active_inference: Optional[inference.SessionInferenceState],
-        session_id: Optional[str],
-    ) -> None:
-        if active_inference is None:
-            return  # session was stopped between pop and processing
-
-        window_arrays = preprocessing.window_to_arrays(window)
-        if window_arrays is None:
-            return  # empty window, nothing to report (startup/reconnect gap)
-
-        if not preprocessing.passes_quality_gate(window_arrays):
-            logger.info("[Window] Rejected due to excessive motion.")
-            self._on_result(
-                {
-                    "type": "window_rejected",
-                    "session_id": session_id,
-                    "reason": "excessive_motion",
-                }
-            )
+        arrays = preprocessing.window_to_arrays(window)
+        if arrays is None:
+            emit({"type": "window_rejected", "reason": "insufficient_or_invalid_data"})
             return
-
+        if not preprocessing.passes_quality_gate(arrays):
+            emit({"type": "window_rejected", "reason": "excessive_motion"})
+            return
         try:
-            sensor_row = feature_extraction.extract_window_features(window_arrays)
-        except Exception as exc:  # noqa: BLE001 - never let one bad window
-            logger.exception(f"[Error] Feature extraction failed: {exc}")
-            self._on_result(
-                {
-                    "type": "window_error",
-                    "session_id": session_id,
-                    "reason": "feature_extraction_failed",
-                    "detail": str(exc),
-                }
-            )
+            sensor_row = feature_extraction.extract_window_features(arrays)
+        except Exception:
+            logger.exception("Feature extraction failed")
+            emit({"type": "window_error", "reason": "feature_extraction_failed"})
             return
-
         if sensor_row is None:
-            logger.info(
-                "[Window] Rejected: PPG/EDA signal quality unusable "
-                "(insufficient peaks or degenerate signal)."
-            )
-            self._on_result(
-                {
-                    "type": "window_rejected",
-                    "session_id": session_id,
-                    "reason": "signal_quality",
-                }
-            )
+            emit({"type": "window_rejected", "reason": "signal_quality"})
             return
-
+        if config.ENABLE_FEATURE_CSV_LOG:
+            try:
+                feature_extraction.append_to_csv(sensor_row)
+            except OSError:
+                # Optional diagnostic logging must never suppress a valid live
+                # model inference, and failure does not change feature values.
+                logger.exception("Optional feature CSV logging failed")
         try:
-            feature_extraction.append_to_csv(sensor_row)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"[Error] Failed to write features to CSV: {exc}")
-            # Non-fatal for the live pipeline: still proceed to predict
-            # and broadcast, just log the CSV failure.
-
-        try:
-            prediction = active_inference.predict(sensor_row)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"[Error] Model inference failed: {exc}")
-            self._on_result(
-                {
-                    "type": "window_error",
-                    "session_id": session_id,
-                    "reason": "inference_failed",
-                    "detail": str(exc),
-                }
-            )
+            result = active_inf.predict(sensor_row)
+        except Exception:
+            logger.exception("Inference failed")
+            emit({"type": "window_error", "reason": "inference_failed"})
             return
-
-        prediction["type"] = (
-            "prediction" if prediction["status"] == "ok" else "warming_up"
-        )
-        prediction["session_id"] = session_id
-        prediction["window_start"] = window_arrays["window_start"]
-        self._on_result(prediction)
+        result_type = {
+            "ok": "prediction", "warming_up": "warming_up",
+            "calibration_failed": "calibration_failed",
+        }.get(result.get("status"), "window_error")
+        result["type"] = result_type
+        result["window_start"] = arrays["window_start"]
+        emit(result)

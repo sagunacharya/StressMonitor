@@ -19,6 +19,10 @@ import utils
 #
 # Keep this as a FIXED hardware calibration factor.
 # Do NOT recalculate it for every 60-second window.
+# Legacy factor retained to preserve the deployed feature distribution. The
+# physical GSR circuit/ADC calibration was not supplied, so this factor is
+# NOT independently validated and must be checked against a known resistor
+# or calibrated conductance source before scientific interpretation.
 EDA_CALIBRATION_FACTOR = 0.04
 
 
@@ -41,27 +45,18 @@ def adc_to_skin_conductance(adc: np.ndarray) -> np.ndarray:
     # --------------------------------------------------------
     # Convert to floating point
     # --------------------------------------------------------
-    adc = adc.astype(float).copy()
+    adc = np.asarray(adc, dtype=float).copy()
+    if adc.ndim != 1 or not np.all(np.isfinite(adc)):
+        raise ValueError("GSR ADC input must be a finite one-dimensional array")
+    if np.any(adc < 0) or np.any(adc > config.EDA_ADC_MAX):
+        raise ValueError("GSR ADC values must be within the configured 12-bit range")
 
-    # --------------------------------------------------------
-    # ESP32 12-bit ADC (0-4095)
-    # -> Grove 10-bit ADC (0-1023)
-    # --------------------------------------------------------
+    # ESP32 12-bit ADC (0-4095) -> nominal Grove 10-bit equivalent (0-1023).
     adc_10bit = adc * 1023.0 / 4095.0
-
-    # --------------------------------------------------------
-    # Prevent division by zero and invalid resistance
-    #
-    # Grove formula contains:
-    #       512 - ADC
-    #
-    # Therefore ADC must remain below 512.
-    # --------------------------------------------------------
-    adc_10bit = np.clip(
-        adc_10bit,
-        0.0,
-        511.0
-    )
+    # The Grove conversion denominator reaches zero at 512. Do not clip a
+    # saturated/out-of-domain signal into a plausible-looking measurement.
+    if np.any(adc_10bit >= 512.0):
+        raise ValueError("GSR ADC is outside the valid range of the Grove conversion formula")
 
     # --------------------------------------------------------
     # Calculate skin resistance
@@ -128,7 +123,12 @@ def preprocess_eda(
     # --------------------------------------------------------
     # 1. ADC -> Skin Conductance
     # --------------------------------------------------------
-    sc = adc_to_skin_conductance(adc_values)
+    try:
+        sc = adc_to_skin_conductance(adc_values)
+    except (TypeError, ValueError, FloatingPointError):
+        return None
+    if not np.all(np.isfinite(sc)):
+        return None
 
     # --------------------------------------------------------
     # 2. Remove outliers

@@ -33,6 +33,8 @@ const state = {
   session: null,
   lastStatus: 'Not Stressed',
   alerts: [],
+  sensorConnected: null,
+  lastReadingAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,6 +99,11 @@ valueEl.textContent =
 function updateStatusPill(status) {
   const pill = document.getElementById('statusPill');
   const text = document.getElementById('statusText');
+  if (status !== 'Stressed' && status !== 'Not Stressed') {
+    pill.className = 'status-pill status-ready';
+    text.textContent = state.session ? 'WAITING' : 'READY';
+    return;
+  }
   const stressed = status === 'Stressed';
   pill.className = `status-pill ${stressed ? 'status-stressed' : 'status-calm'}`;
   text.textContent = stressed ? 'STRESSED' : 'NOT STRESSED';
@@ -126,6 +133,10 @@ function renderAlerts() {
 }
 
 function handleReading(reading) {
+  if (!reading || reading.timestamp == null || !Number.isFinite(Number(reading.timestamp)) ||
+      Number(reading.timestamp) <= 0 || !['Stressed', 'Not Stressed'].includes(reading.stress_status)) return;
+  reading.timestamp = Number(reading.timestamp);
+  state.lastReadingAt = Number(reading.timestamp);
   state.history.push(reading);
   if (state.history.length > 300) state.history.shift();
   const prev = state.history[state.history.length - 6];
@@ -145,6 +156,16 @@ function handleReading(reading) {
   state.lastStatus = reading.stress_status;
 
   document.getElementById('bufferCount').textContent = `${state.history.length} readings buffered this session`;
+}
+
+function clearLiveReadings() {
+  state.latest = null;
+  state.lastReadingAt = null;
+  updateMetrics(null, null);
+  updateStatusPill(null);
+  document.getElementById('lastUpdate').textContent = '—';
+  document.getElementById('bufferCount').textContent = '0 readings buffered this session';
+  showProbLine(null);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +203,23 @@ function updateSessionUI() {
 // ---------------------------------------------------------------------------
 
 function setEsp32Status(connected) {
+  state.sensorConnected = connected === true;
   const banner = document.getElementById('progressBanner');
   if (connected === false) {
     banner.style.display = 'block';
-    banner.textContent = 'ESP32 not connected — waiting for sensor link...';
+    banner.textContent = 'ESP32 disconnected — live readings are paused until the sensor link returns.';
+    if (state.latest) {
+      document.getElementById('statusPill').className = 'status-pill status-warming';
+      document.getElementById('statusText').textContent = 'STALE DATA';
+    }
+  } else if (connected === true && state.session) {
+    showProgress('ESP32 reconnected — waiting for a fresh valid window. Any previously displayed value is not live.');
+    if (state.latest) {
+      document.getElementById('statusPill').className = 'status-pill status-warming';
+      document.getElementById('statusText').textContent = 'STALE DATA';
+    }
+  } else if (connected === true) {
+    hideProgress();
   }
 }
 
@@ -200,8 +234,18 @@ function hideProgress() {
 }
 
 function showProbLine(prob, threshold) {
-    const el = document.getElementById('probLine');
-    if (el) el.style.display = 'none';
+  const el = document.getElementById('probLine');
+  const probability = Number(prob);
+  const cutoff = Number(threshold);
+  if (!el) return;
+  if (prob == null || threshold == null || !Number.isFinite(probability) ||
+      !Number.isFinite(cutoff) || probability < 0 || probability > 1 || cutoff < 0 || cutoff > 1) {
+    el.textContent = '';
+    el.style.display = 'none';
+    return;
+  }
+  el.textContent = `Model stress score: ${(probability * 100).toFixed(1)}% · decision threshold: ${(cutoff * 100).toFixed(1)}%`;
+  el.style.display = 'block';
 }
 
 function setReadyStatus() {
@@ -236,48 +280,90 @@ function connect() {
     };
 
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (!msg || typeof msg.type !== 'string') return;
 
       if (msg.type === 'history') {
-        state.history = msg.data.slice(-300);
-        if (msg.session) { state.session = msg.session; updateSessionUI(); }
-        const last = state.history[state.history.length - 1];
-        if (last) { updateMetrics(last, state.history[state.history.length - 6]); updateStatusPill(last.stress_status); state.lastStatus = last.stress_status; }
-
+        state.history = Array.isArray(msg.data) ? msg.data.slice(-300) : [];
+        state.session = msg.session || null;
+        state.latest = state.history.length ? state.history[state.history.length - 1] : null;
+        state.alerts = [];
+        let priorStatus = null;
+        state.history.forEach((reading) => {
+          const currentStatus = reading.stress_status;
+          if ((currentStatus === 'Stressed' || currentStatus === 'Not Stressed') &&
+              priorStatus !== null && currentStatus !== priorStatus) {
+            state.alerts.push({ timestamp: Number(reading.timestamp), status: currentStatus });
+          }
+          if (currentStatus === 'Stressed' || currentStatus === 'Not Stressed') priorStatus = currentStatus;
+        });
+        state.alerts = state.alerts.slice(-50);
+        renderAlerts();
+        document.getElementById('bufferCount').textContent = `${state.history.length} readings buffered this session`;
+        updateSessionUI();
+        if (state.latest) {
+          updateMetrics(state.latest, state.history[state.history.length - 6]);
+          updateStatusPill(state.latest.stress_status);
+          state.lastStatus = state.latest.stress_status || 'Not Stressed';
+          state.lastReadingAt = Number(state.latest.timestamp) || null;
+          const updateEl = document.getElementById('lastUpdate');
+          updateEl.textContent = state.lastReadingAt ? new Date(state.lastReadingAt * 1000).toLocaleTimeString() : '—';
+        } else {
+          clearLiveReadings();
+        }
       } else if (msg.type === 'esp32_status') {
         setEsp32Status(msg.connected);
-
       } else if (msg.type === 'session_status') {
         if (msg.state === 'ready') {
+          if (!msg.session_id || state.session?.id === msg.session_id) {
+            state.session = null;
+            state.history = [];
+            clearLiveReadings();
+            updateSessionUI();
+          }
           setReadyStatus();
         } else if (msg.state === 'collecting') {
-          collectingSamples = 0;
-          showProgress(`Collecting data: 0 / ${msg.samples_needed} samples`);
+          collectingSamples = Number(msg.samples_collected) || 0;
+          const needed = Number(msg.samples_needed) || 3840;
+          showProgress(`Collecting data: ${collectingSamples} / ${needed} samples`);
+        } else if (msg.state === 'calibrating') {
+          setWarmingStatus(Number(msg.windows_seen) || 0, Number(msg.windows_needed) || 3);
+        } else if (msg.state === 'calibration_failed') {
+          showProgress('Calibration failed: baseline variation is too small. Stop, check contact and signal quality, then restart in a quiet/resting setup.');
+        } else if (msg.state === 'prediction_available') {
+          showProgress('Baseline calibration is complete. Waiting for the next fresh, valid prediction window.');
         }
-
       } else if (msg.type === 'collecting_progress') {
         collectingSamples = msg.samples_collected;
         const secs = (msg.samples_collected / 64).toFixed(0);
         const totalSecs = (msg.samples_needed / 64).toFixed(0);
         showProgress(`Collecting data: ${msg.samples_collected} / ${msg.samples_needed} samples (${secs}s / ${totalSecs}s)`);
-
       } else if (msg.type === 'warming_up') {
         setWarmingStatus(msg.windows_seen, msg.windows_needed);
-
       } else if (msg.type === 'reading') {
         hideProgress();
         showProbLine(msg.stress_prob, msg.decision_threshold);
         handleReading(msg);
-
       } else if (msg.type === 'window_rejected') {
-        showProgress(
-          msg.reason === 'excessive_motion'
-            ? 'Window rejected: excessive motion detected — hold still for a cleaner reading.'
-            : 'Window rejected: signal quality too low for this window.'
-        );
-
+        showProgress(msg.reason === 'excessive_motion'
+          ? 'Window rejected: excessive motion detected — hold still for a cleaner reading.'
+          : 'Window rejected: insufficient PPG/EDA quality or a sampling gap; waiting for a clean window.');
+      } else if (msg.type === 'calibration_failed') {
+        showProgress('Calibration could not estimate stable baseline variation. Stop, check sensor contact, then start a new quiet/resting session.');
+      } else if (msg.type === 'sampling_gap') {
+        showProgress(state.sensorConnected === false
+          ? 'ESP32 disconnected — partial window discarded; waiting for the serial link to return.'
+          : 'Sampling gap detected — partial window discarded; collecting a fresh window.');
+      } else if (msg.type === 'sensor_quality') {
+        const messages = {
+          missing_ppg_data: 'PPG input is missing. Check finger placement, sensor power and I²C wiring.',
+          ppg_saturated: 'PPG input is saturated. Check sensor contact and optical conditions.',
+          repeated_ppg_values: 'Repeated PPG values detected. The partial window was discarded; checking signal quality.',
+        };
+        showProgress(messages[msg.reason] || 'Sensor data quality issue detected.');
       } else if (msg.type === 'window_error') {
-        showProgress(`Processing error: ${msg.detail || msg.reason}`);
+        showProgress(`Processing failed (${msg.reason || 'unknown stage'}). No prediction was generated.`);
       }
     };
 
@@ -308,7 +394,7 @@ async function checkAuth() {
 checkAuth();
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
-  try { await fetch(`${API_URL}/api/auth/logout`, { method: 'POST', credentials: 'include' }); } catch {}
+  try { const res = await fetch(`${API_URL}/api/auth/logout`, { method: 'POST', credentials: 'include' }); if (!res.ok) throw new Error('logout failed'); } catch { showProgress('Logout could not be confirmed; retry or close the browser session.'); return; }
   window.location.href = '/login';
 });
 
@@ -323,23 +409,35 @@ document.getElementById('sessionBtn').addEventListener('click', async () => {
   btn.disabled = true;
   try {
     if (isActive) {
-      await fetch(`${API_URL}/api/sessions/${state.session.id}/stop`, { method: 'POST', credentials: 'include' });
+      const res = await fetch(`${API_URL}/api/sessions/${encodeURIComponent(state.session.id)}/stop`, { method: 'POST', credentials: 'include' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Could not stop session');
       state.session = null;
       state.history = [];
       state.alerts = [];
       state.lastStatus = 'Not Stressed';
       renderAlerts();
+      clearLiveReadings();
       updateSessionUI();
     } else {
-      const res = await fetch(`${API_URL}/api/sessions/start?subject_id=SUBJECT-01`, { method: 'POST', credentials: 'include' });
-      if (!res.ok) throw new Error('start failed');
-      state.session = await res.json();
+      const acknowledged = window.confirm('Calibration uses the first 3 or more valid windows as your baseline. Before continuing, seat the subject comfortably, keep still, and aim for a quiet/resting state. This condition cannot be verified automatically. Start calibration?');
+      if (!acknowledged) return;
+      const res = await fetch(`${API_URL}/api/sessions/start`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject_id: 'SUBJECT-01', calibration_acknowledged: true }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Could not start session');
+      state.session = body;
       state.history = [];
+      state.alerts = [];
+      clearLiveReadings();
       updateSessionUI();
+      showProgress('Calibration started. Keep the subject quiet and still while valid baseline windows are collected.');
     }
-  } catch {
-    console.warn('Backend not reachable for session control.');
-    showProgress('Could not reach the backend — session control failed.');
+  } catch (error) {
+    showProgress(error instanceof Error ? error.message : 'Session control failed.');
   } finally {
     btn.disabled = false;
   }
@@ -382,52 +480,76 @@ function duration(start, end) {
 
 async function loadSessions() {
   const body = document.getElementById('sessionsBody');
-  body.innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+  body.replaceChildren();
+  const loading = document.createElement('tr');
+  const cell = document.createElement('td'); cell.colSpan = 6; cell.className = 'muted'; cell.textContent = 'Loading…';
+  loading.appendChild(cell); body.appendChild(loading);
   try {
-    const res = await fetch(`${API_URL}/api/sessions`, { credentials: 'include' });
+    const res = await fetch(`${API_URL}/api/sessions?limit=200`, { credentials: 'include' });
     const sessions = await res.json();
-    if (sessions.length === 0) {
-      body.innerHTML = '<tr><td colspan="6" class="muted">No past sessions yet — start one from the Live tab.</td></tr>';
-      return;
+    if (!res.ok) throw new Error(sessions.error || 'Could not load sessions');
+    body.replaceChildren();
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      const row = document.createElement('tr'); const td = document.createElement('td');
+      td.colSpan = 6; td.className = 'muted'; td.textContent = 'No past sessions yet — start one from the Live tab.';
+      row.appendChild(td); body.appendChild(row); return;
     }
-    body.innerHTML = sessions.map((s) => `
-      <tr>
-        <td>${fmtDate(s.start_time)}</td>
-        <td class="muted">${s.subject_id}</td>
-        <td>${duration(s.start_time, s.end_time)}</td>
-        <td>${s.num_readings}</td>
-        <td>${s.stressed_count} / ${s.num_readings}</td>
-        <td><button class="view-btn" onclick="viewSession('${s.id}')">View</button></td>
-      </tr>
-    `).join('');
-  } catch {
-    body.innerHTML = '<tr><td colspan="6" class="muted">Could not reach backend.</td></tr>';
+    sessions.forEach((item) => {
+      const tr = document.createElement('tr');
+      [fmtDate(item.start_time), item.subject_id, duration(item.start_time, item.end_time),
+       String(item.num_readings ?? 0), `${item.stressed_count ?? 0} / ${item.num_readings ?? 0}`].forEach((value, index) => {
+        const td = document.createElement('td'); td.textContent = value == null ? '—' : String(value);
+        if (index === 1) td.className = 'muted'; tr.appendChild(td);
+      });
+      const td = document.createElement('td'); const button = document.createElement('button');
+      button.className = 'view-btn'; button.textContent = 'View';
+      button.addEventListener('click', () => viewSession(item.id)); td.appendChild(button); tr.appendChild(td);
+      body.appendChild(tr);
+    });
+  } catch (error) {
+    body.replaceChildren(); const row = document.createElement('tr'); const td = document.createElement('td');
+    td.colSpan = 6; td.className = 'muted'; td.textContent = error instanceof Error ? error.message : 'Could not reach backend.';
+    row.appendChild(td); body.appendChild(row);
   }
 }
 
 async function viewSession(sessionId) {
   const card = document.getElementById('recordsCard');
   const body = document.getElementById('recordsBody');
-  card.style.display = 'block';
-  body.innerHTML = '<tr><td colspan="6" class="muted">Loading…</td></tr>';
+  card.style.display = 'block'; body.replaceChildren();
   try {
-    const res = await fetch(`${API_URL}/api/sessions/${sessionId}/readings`, { credentials: 'include' });
+    const res = await fetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/readings?limit=1000`, { credentials: 'include' });
     const readings = await res.json();
-    if (readings.length === 0) {
-      body.innerHTML = '<tr><td colspan="6" class="muted">No readings recorded for this session.</td></tr>';
-      return;
+    if (!res.ok) throw new Error(readings.error || 'Could not load readings');
+    if (!Array.isArray(readings) || readings.length === 0) {
+      const row = document.createElement('tr'); const td = document.createElement('td');
+      td.colSpan = 6; td.className = 'muted'; td.textContent = 'No readings recorded for this session.';
+      row.appendChild(td); body.appendChild(row); return;
     }
-    body.innerHTML = readings.map((r) => {
-      const stressed = r.stress_label === 1;
-      return `
-        <tr>
-          <td class="muted">${fmtTime(r.timestamp)}</td>
-          <td>${r.hr}</td><td>${r.sdnn}</td><td>${r.rmssd}</td><td>${r.eda_mean}</td>
-          <td><span class="badge ${stressed ? 'stressed' : 'calm'}">${stressed ? 'Stressed' : 'Not Stressed'}</span></td>
-        </tr>`;
-    }).join('');
-  } catch {
-    body.innerHTML = '<tr><td colspan="6" class="muted">Could not reach backend.</td></tr>';
+    readings.forEach((reading) => {
+      const tr = document.createElement('tr');
+      [fmtTime(reading.timestamp), reading.hr, reading.sdnn, reading.rmssd, reading.eda_mean].forEach((value, index) => {
+        const td = document.createElement('td');
+        td.textContent = value == null || !Number.isFinite(Number(value)) ? '—' : index === 0 ? String(value) : Number(value).toFixed(2);
+        if (index === 0) td.className = 'muted'; tr.appendChild(td);
+      });
+      const status = reading.stress_status || (reading.stress_label === 1 ? 'Stressed' : reading.stress_label === 0 ? 'Not Stressed' : 'Unknown');
+      const td = document.createElement('td'); const badge = document.createElement('span');
+      badge.className = `badge ${status === 'Stressed' ? 'stressed' : 'calm'}`; badge.textContent = status;
+      td.appendChild(badge); tr.appendChild(td); body.appendChild(tr);
+    });
+  } catch (error) {
+    body.replaceChildren(); const row = document.createElement('tr'); const td = document.createElement('td');
+    td.colSpan = 6; td.className = 'muted'; td.textContent = error instanceof Error ? error.message : 'Could not reach backend.';
+    row.appendChild(td); body.appendChild(row);
   }
 }
 window.viewSession = viewSession;
+
+setInterval(() => {
+  if (state.session && state.latest && state.lastReadingAt && Date.now() / 1000 - state.lastReadingAt > 90) {
+    document.getElementById('statusPill').className = 'status-pill status-warming';
+    document.getElementById('statusText').textContent = 'STALE DATA';
+    showProgress('No recent prediction has arrived. Check the serial connection and signal quality; the last value is not live.');
+  }
+}, 5000);

@@ -19,6 +19,12 @@ SERIAL_BAUDRATE = int(os.getenv("SERIAL_BAUDRATE", "115200"))
 SERIAL_TIMEOUT_SEC = 1.0          # read() timeout, keeps reconnect loop responsive
 RECONNECT_DELAY_SEC = 2.0         # wait between reconnect attempts
 
+# Serial diagnostics and sample validation. A sequence/time gap invalidates
+# the current partial window rather than silently assuming uniform samples.
+MAX_PPG_RAW = 262143.0  # MAX30102 18-bit ADC output
+MAX_ACCEL_MAG_G = 8.0
+MAX_DEVICE_GAP_MS = 25.0
+
 # ---------------------------------------------------------------------------
 # Required JSON keys from the ESP32-S3 packet
 # ---------------------------------------------------------------------------
@@ -35,11 +41,11 @@ SAMPLE_RATE_HZ = 64.0
 # Sample-count based sliding window (not time-based): 3840 samples = 60 s at
 # 64 Hz, 1920-sample step = 30 s shift / 50% overlap at 64 Hz.
 WINDOW_SIZE_SAMPLES = 3840
-WINDOW_STEP_SAMPLES = 128
+WINDOW_STEP_SAMPLES = 1920
 
 # Minimum samples required in a window before attempting processing at all
 # (guards against a near-empty window right after connect/reconnect).
-MIN_SAMPLES_PER_WINDOW = int(WINDOW_SIZE_SAMPLES * 0.5)
+MIN_SAMPLES_PER_WINDOW = WINDOW_SIZE_SAMPLES
 
 # ---------------------------------------------------------------------------
 # PPG preprocessing
@@ -88,6 +94,9 @@ MOTION_MAX_BAD_FRACTION = 0.15
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
+# Feature CSV persistence is off by default because these features are
+# physiological data. Opt in only for a documented local research purpose.
+ENABLE_FEATURE_CSV_LOG = os.getenv("ENABLE_FEATURE_CSV_LOG", "0").strip().lower() in {"1", "true", "yes"}
 OUTPUT_CSV_PATH = "extracted_features.csv"
 CSV_COLUMNS = (
     "window_start",

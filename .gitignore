@@ -31,3 +31,9 @@ data/raw/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local database exports and recordings
+local_db_dumps/
+*.sql.gz
+*.dump
+data/recordings/

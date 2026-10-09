@@ -88,7 +88,7 @@ REM ------------------------------------------------
 where py >nul 2>nul
 
 if not errorlevel 1 (
-    set "PYLAUNCHER=py -3"
+    set "PYLAUNCHER=py -3.13"
 ) else (
     where python >nul 2>nul
 
@@ -124,30 +124,20 @@ if not exist "%PYEXE%" (
 )
 
 REM ------------------------------------------------
-REM Install requirements if requirements are present
+REM Install/update pinned requirements when manifest hash changes
 REM ------------------------------------------------
 
 if exist "%BACKEND%\requirements.txt" (
-    if not exist "%VENV%\requirements.installed" (
+    echo.
+    echo [INFO] Checking pinned Python requirements...
+    "%PYEXE%" "%BACKEND%\install_requirements.py"
+    if errorlevel 1 (
         echo.
-        echo [INFO] Installing Python requirements...
-        echo This may take a few minutes on first startup.
+        echo [ERROR] Python requirements installation failed.
+        echo Use: "%PYEXE%" "%BACKEND%\install_requirements.py" --force
         echo.
-
-        "%PYEXE%" -m pip install -r "%BACKEND%\requirements.txt"
-
-        if errorlevel 1 (
-            echo.
-            echo [ERROR] Python requirements installation failed.
-            echo.
-            pause
-            exit /b 1
-        )
-
-        type nul > "%VENV%\requirements.installed"
-
-        echo.
-        echo [OK] Requirements installed.
+        pause
+        exit /b 1
     )
 )
 
@@ -162,7 +152,13 @@ echo.
 if exist "%ROOT%.stress_monitor_backend.log" del "%ROOT%.stress_monitor_backend.log"
 if exist "%ROOT%.stress_monitor_backend_error.log" del "%ROOT%.stress_monitor_backend_error.log"
 
-start "Stress Monitor Backend" /min cmd /c ""%PYEXE%" "%BACKEND%\app.py" > "%ROOT%.stress_monitor_backend.log" 2> "%ROOT%.stress_monitor_backend_error.log""
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%Start Stress Monitor Backend.ps1"
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Could not launch the backend. Check Python and launcher paths.
+    pause
+    exit /b 1
+)
 
 REM ------------------------------------------------
 REM Wait for backend

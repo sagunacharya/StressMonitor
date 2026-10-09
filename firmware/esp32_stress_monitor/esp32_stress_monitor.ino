@@ -7,7 +7,8 @@
  *   Grove GSR v2.0 -> Raw ADC
  *
  * Output JSON:
- *   {"ir":...,"red":...,"accMagnitude":...,"eda":...}
+ *   {"seq":...,"t_ms":...,"ir":...,"red":...,"accMagnitude":...,"eda":...}
+ * Packets are emitted only when a fresh MAX30102 FIFO sample was consumed.
  *
  * Target system rate:
  *   64 Hz
@@ -46,7 +47,7 @@ MPU6500_WE myMPU6500 = MPU6500_WE(0x68);
 // JSON
 // ============================================================
 
-StaticJsonDocument<128> doc;
+StaticJsonDocument<192> doc;
 
 
 // ============================================================
@@ -56,6 +57,8 @@ StaticJsonDocument<128> doc;
 const uint32_t SAMPLE_INTERVAL_US = 15625UL;  // 64 Hz
 
 uint32_t nextSampleTime = 0;
+uint32_t deviceStartMs = 0;
+uint32_t sampleSequence = 0;
 
 
 // ============================================================
@@ -213,6 +216,7 @@ void setup()
 
 
     nextSampleTime = micros();
+    deviceStartMs = millis();
 
     rateStart = millis();
 }
@@ -257,23 +261,28 @@ void loop()
      */
 
     particleSensor.check();
-
-
-    if (particleSensor.available())
-    {
-        lastIR =
-            particleSensor.getFIFOIR();
-
-        lastRed =
-            particleSensor.getFIFORed();
-
-        particleSensor.nextSample();
-    }
-
-
-    // Use the most recent valid values.
+    bool ppgFresh = false;
     uint32_t ir = lastIR;
     uint32_t red = lastRed;
+    const uint32_t currentSequence = sampleSequence++;
+
+    // setup(400 Hz, averaging=4) nominally produces about 100 averaged FIFO
+    // entries/s. Drain all entries since the previous loop and keep the newest
+    // one for this 64-Hz packet. This prevents FIFO backlog and stale-value
+    // repetition; a tick with no fresh FIFO entry emits no sample packet.
+    while (particleSensor.available())
+    {
+        lastIR = particleSensor.getFIFOIR();
+        lastRed = particleSensor.getFIFORed();
+        particleSensor.nextSample();
+        ppgFresh = true;
+    }
+    if (!ppgFresh)
+    {
+        return;
+    }
+    ir = lastIR;
+    red = lastRed;
 
 
     // ========================================================
@@ -315,6 +324,8 @@ void loop()
     doc.clear();
 
 
+    doc["seq"] = currentSequence;
+    doc["t_ms"] = (uint32_t)(millis() - deviceStartMs);
     doc["ir"] =
         ir;
 

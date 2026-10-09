@@ -11,6 +11,9 @@ document.querySelectorAll('.auth-tab-btn').forEach((btn) => {
     btn.classList.add('active');
     mode = btn.dataset.mode;
     document.getElementById('authSubmit').textContent = mode === 'login' ? 'Sign In' : 'Create Account';
+    const passwordInput = document.getElementById('password');
+    passwordInput.minLength = mode === 'register' ? 12 : 1;
+    passwordInput.autocomplete = mode === 'register' ? 'new-password' : 'current-password';
     document.getElementById('authError').textContent = '';
   });
 });
