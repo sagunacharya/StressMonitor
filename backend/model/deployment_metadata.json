@@ -1,0 +1,92 @@
+{
+  "model_type": "xgboost.Booster (binary:logistic)",
+  "training_date_utc": "2026-08-04T00:21:40.368917+00:00",
+  "hyperparameters": {
+    "max_depth": 5,
+    "learning_rate": 0.02726983212738219,
+    "subsample": 0.5008468253139762,
+    "colsample_bytree": 0.750881271229272,
+    "min_child_weight": 20,
+    "gamma": 0.004971147243220855,
+    "reg_alpha": 3.1687593834757655e-06,
+    "reg_lambda": 1.902636893379626e-08,
+    "max_delta_step": 1
+  },
+  "hyperparameter_selection": "fresh_full_dataset_optuna: one new Optuna study of 100 trials was run on the complete development dataset (15 subjects, 9654 rows), using the same search space (config.XGB_SEARCH_SPACE) and the same composite objective as every LOSO fold's nested-CV search (loso_runner.run_optuna_study). The returned hyperparameters are this study's own best trial (composite=0.8650, precision=0.900, recall=0.865, f1=0.882) -- an actual combination this study evaluated via its own internal GroupKFold inner CV, never a selection among the 15 LOSO folds' best_params and never an elementwise per-key median/mode recombination across them. NOTE: LOSO (the loop that just finished) is used exclusively for unbiased performance estimation -- see outputs/reports/overall_metrics.json and per_subject_metrics.csv, both untouched by this study. This deployment model is a separate, later artifact retrained on the complete dataset with its own fresh optimization, and carries no unbiased performance estimate of its own.",
+  "xgb_params_actually_used": {
+    "max_depth": 5,
+    "learning_rate": 0.02726983212738219,
+    "subsample": 0.5008468253139762,
+    "colsample_bytree": 0.750881271229272,
+    "min_child_weight": 20,
+    "gamma": 0.004971147243220855,
+    "reg_alpha": 3.1687593834757655e-06,
+    "reg_lambda": 1.902636893379626e-08,
+    "max_delta_step": 1,
+    "verbosity": 0,
+    "random_state": 42,
+    "scale_pos_weight": 1.0
+  },
+  "num_boost_round": 127,
+  "num_boost_round_source": "run_inner_cv on full_df with final_params",
+  "decision_threshold": 0.3562862862862863,
+  "decision_threshold_source": "best_trial.user_attrs['threshold'] from the same fresh, full-dataset Optuna study (loso_runner.run_final_optuna_study) that selected final_params above -- the median of that trial's own inner-CV GroupKFold fold thresholds over the complete development dataset, computed via metrics.find_threshold_recall_at_precision, identical in method to every LOSO fold's own threshold",
+  "feature_list_raw": [
+    "HR",
+    "SDNN",
+    "RMSSD",
+    "eda_mean",
+    "eda_std",
+    "eda_min",
+    "eda_max",
+    "eda_range",
+    "eda_slope"
+  ],
+  "feature_list_transformed": [
+    "HR",
+    "SDNN",
+    "RMSSD",
+    "eda_mean",
+    "eda_std",
+    "eda_min",
+    "eda_max",
+    "eda_range",
+    "eda_slope"
+  ],
+  "n_training_subjects": 15,
+  "n_training_rows_pre_smote": 9654,
+  "n_training_rows_post_smote": 11347,
+  "smote_used": true,
+  "preprocessing": {
+    "per_subject_baseline_normalization": true,
+    "description": "preprocessing.per_subject_baseline_normalize applied upstream of this model (in preprocessing.full_prepare, before LOSO/final-model training even begins), using each subject's own baseline-condition rows only. At inference time on a NEW subject with no prior baseline recording, this step cannot be replicated exactly -- see the 'How to load and use' notes for the practical implication.",
+    "standard_scaler_columns": [
+      "HR",
+      "SDNN",
+      "RMSSD",
+      "eda_mean",
+      "eda_std",
+      "eda_min",
+      "eda_max",
+      "eda_range",
+      "eda_slope"
+    ],
+    "minmax_scaler_columns": []
+  },
+  "generalization_estimate_caveat": "This model was trained on ALL available subjects, so it has no unbiased held-out evaluation of its own. Use the LOSO results in outputs/reports/overall_metrics.json and per_subject_metrics.csv -- produced by evaluating this SAME hyperparameter configuration across 15 held-out subjects -- as the expected real-world performance estimate for this deployment model.",
+  "software_versions": {
+    "python": "3.13.9",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "xgboost": "3.3.0",
+    "scikit_learn": "1.9.0",
+    "numpy": "2.5.1",
+    "pandas": "2.3.3",
+    "joblib": "1.5.3"
+  },
+  "artifact_paths": {
+    "final_model": "final_model.pkl",
+    "feature_names": "feature_names.json",
+    "decision_threshold": "decision_threshold.json",
+    "scaler": "scaler.pkl"
+  }
+}

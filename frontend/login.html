@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in · Stress Monitoring Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="auth-body">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <span class="brand-icon">♥</span>
+      <div>
+        <h1>Stress Monitor</h1>
+      </div>
+    </div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab-btn active" data-mode="login">Sign In</button>
+      <button class="auth-tab-btn" data-mode="register">Create Account</button>
+    </div>
+
+    <form id="authForm" class="auth-form">
+      <label>Username
+        <input type="text" id="username" autocomplete="username" required minlength="3" />
+      </label>
+      <label>Password
+        <input type="password" id="password" autocomplete="current-password" required minlength="6" />
+      </label>
+      <div id="authError" class="auth-error"></div>
+      <button type="submit" id="authSubmit" class="btn btn-start auth-submit">Sign In</button>
+    </form>
+
+  </div>
+  <script src="login.js"></script>
+</body>
+</html>

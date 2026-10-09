@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stress Monitoring Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="app-body">
+
+  <aside class="sidebar">
+    <div class="sb-brand">
+      <span class="sb-brand-icon">♥</span>
+      <div>
+        <h1>Stress Monitor</h1>
+      </div>
+    </div>
+
+    <div class="sb-section-label">Clinical</div>
+    <nav class="sb-nav">
+      <button class="sb-nav-btn active" data-tab="live">
+        <span class="sb-nav-icon">❤</span> Vitals Monitor
+      </button>
+      <button class="sb-nav-btn" data-tab="history">
+        <span class="sb-nav-icon">🗂</span> Session History
+      </button>
+      <button class="sb-nav-btn" id="alertsNavBtn">
+        <span class="sb-nav-icon">🔔</span> Alerts
+      </button>
+    </nav>
+
+    <div class="sb-bottom">
+      <div class="conn-status">
+        <span id="connDot" class="conn-dot"></span>
+        <span id="connLabel">CONNECTING</span>
+      </div>
+      <div class="sb-user">
+        <span class="sb-user-icon">👤</span>
+        <span id="usernameLabel">—</span>
+      </div>
+      <button id="logoutBtn" class="sb-logout">Log out</button>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar">
+      <div class="topbar-titles">
+        <h2>Dashboard</h2>
+        <p>Live vitals</p>
+      </div>
+      <div class="topbar-right">
+        <button id="sessionBtn" class="btn btn-start">Start Session</button>
+        <div class="last-update">
+          <span class="last-update-label">Last update</span>
+          <span id="lastUpdate">—</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="status-strip">
+      <span class="chip chip-live"><span class="chip-dot"></span> LIVE</span>
+      <span class="chip">STRESS MONITOR</span>
+      <span class="chip chip-user"><span class="sb-user-icon">👤</span> <span id="subjectLabel">—</span></span>
+    </div>
+
+    <nav class="tabs mobile-tabs">
+      <button class="tab-btn active" data-tab="live">Live</button>
+      <button class="tab-btn" data-tab="history">History</button>
+    </nav>
+
+    <main id="liveTab" class="tab-panel active">
+      <section class="status-hero">
+        <div class="status-hero-inner">
+          <span class="status-label">Current Status</span>
+          <div id="statusPill" class="status-pill status-calm">
+            <span id="statusText">READY</span>
+          </div>
+          <div id="progressBanner" class="progress-banner" style="display:none;"></div>
+          <div id="probLine" class="prob-line" style="display:none;"></div>
+        </div>
+      </section>
+
+      <h3 class="section-label">Live Vitals</h3>
+      <section class="metrics-grid-uniform row-of-5" id="metricsGridRow1"></section>
+      <section class="metrics-grid-uniform row-of-4" id="metricsGridRow2"></section>
+
+      <section class="event-log-card" id="alerts">
+        <h2>Event Log</h2>
+        <ul id="eventLog" class="event-log">
+          <li class="event-empty">No transitions yet — status is stable.</li>
+        </ul>
+        <div class="buffer-note" id="bufferCount">0 readings buffered this session</div>
+      </section>
+    </main>
+
+    <main id="historyTab" class="tab-panel">
+      <section class="sessions-card">
+        <h2>Past Sessions</h2>
+        <div class="table-wrap">
+          <table class="sessions-table">
+            <thead>
+              <tr>
+                <th>Started</th><th>Subject</th><th>Duration</th><th>Readings</th><th>Stressed</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="sessionsBody">
+              <tr><td colspan="6" class="muted">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="records-card" id="recordsCard" style="display:none;">
+        <h2>Session Records</h2>
+        <div class="table-wrap">
+          <table class="records-table">
+            <thead>
+              <tr><th>Time</th><th>HR</th><th>SDNN</th><th>RMSSD</th><th>EDA Mean</th><th>Status</th></tr>
+            </thead>
+            <tbody id="recordsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

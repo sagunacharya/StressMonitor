@@ -1,0 +1,36 @@
+{
+  "raw_feature_order": [
+    "HR",
+    "SDNN",
+    "RMSSD",
+    "eda_mean",
+    "eda_std",
+    "eda_min",
+    "eda_max",
+    "eda_range",
+    "eda_slope"
+  ],
+  "transformed_feature_order": [
+    "HR",
+    "SDNN",
+    "RMSSD",
+    "eda_mean",
+    "eda_std",
+    "eda_min",
+    "eda_max",
+    "eda_range",
+    "eda_slope"
+  ],
+  "standard_scaler_columns": [
+    "HR",
+    "SDNN",
+    "RMSSD",
+    "eda_mean",
+    "eda_std",
+    "eda_min",
+    "eda_max",
+    "eda_range",
+    "eda_slope"
+  ],
+  "minmax_scaler_columns": []
+}

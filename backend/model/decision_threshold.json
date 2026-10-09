@@ -1,0 +1,4 @@
+{
+  "threshold": 0.3562862862862863,
+  "source": "best_trial.user_attrs['threshold'] from the same fresh, full-dataset Optuna study (loso_runner.run_final_optuna_study) that selected final_params above -- the median of that trial's own inner-CV GroupKFold fold thresholds over the complete development dataset, computed via metrics.find_threshold_recall_at_precision, identical in method to every LOSO fold's own threshold"
+}
